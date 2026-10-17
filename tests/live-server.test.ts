@@ -1,3 +1,4 @@
+vi.mock('../server/memories',()=>({keyTag:()=> 'tag',MemoryStore:class {async create(){} async update(){} async append(){} async refresh(){} async list(){return []}}}));
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Express } from 'express';

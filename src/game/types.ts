@@ -50,6 +50,7 @@ export interface GameState {
   visited: string[];
   history: LogEntry[];
   turns: number;
+  unmatchedTurns: number;
   updatedAt: number;
 }
 export interface TurnResult {
@@ -57,4 +58,5 @@ export interface TurnResult {
   reply: string;
   advanced: boolean;
   actionId: string | null;
+  fallbackApplied?: boolean;
 }

@@ -5,3 +5,6 @@ dist/
 !.env.example
 artifacts/
 .DS_Store
+
+.data/
+.env.*.tmp

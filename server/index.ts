@@ -8,6 +8,7 @@ import {
   availableActions,
   parseSave,
   respondLocally,
+  recordUnmatched,
   applyAction,
 } from "../src/game/engine";
 import { characters, story } from "../src/game/story";
@@ -23,7 +24,7 @@ app.use("/api", (req, res, next) => {
   }
   next();
 });
-app.use(express.json({ limit: "512kb" }));
+app.use(express.json({ limit: "5mb" }));
 const live = installLive(app, server);
 app.post("/api/turn", async (req, res) => {
   const state = parseSave(JSON.stringify(req.body?.state ?? null));
@@ -79,35 +80,13 @@ app.post("/api/turn", async (req, res) => {
       res.json({ ...applyAction(state, result.actionId, input), mode: "ai" });
       return;
     }
-    const local = respondLocally(state, "");
     if (
       result.actionId === null &&
       typeof result.reply === "string" &&
       result.reply.trim() &&
       result.reply.length <= 600
     ) {
-      const turns = state.turns + 1;
-      local.state = {
-        ...state,
-        turns,
-        updatedAt: Date.now(),
-        history: [
-          ...state.history,
-          {
-            id: `${turns}-player`,
-            speaker: "你",
-            text: input,
-            nodeId: node.id,
-          },
-          {
-            id: `${turns}-reply`,
-            speaker: characters[node.character].name,
-            text: result.reply,
-            nodeId: node.id,
-          },
-        ].slice(-160),
-      };
-      res.json({ ...local, reply: result.reply, mode: "ai" });
+      res.json({ ...recordUnmatched(state, input, result.reply), mode: "ai" });
       return;
     }
     fallback();

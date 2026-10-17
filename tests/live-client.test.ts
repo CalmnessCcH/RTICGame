@@ -35,6 +35,8 @@ function setup(leave: () => Promise<void> = async () => {}) {
   let joined = false;
   const engine = {
     on: vi.fn(),
+    switchMicrophone: vi.fn(async () => {}),
+    muteAllRemoteAudioPlaying: vi.fn(),
     publishLocalVideoStream: vi.fn(async (_enabled: boolean) => {}),
     publishLocalAudioStream: vi.fn(async (_enabled: boolean) => {}),
     setChannelProfile: vi.fn(async () => {}),
@@ -94,6 +96,38 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 describe("live lifecycle", () => {
+  it('retains output mute requested before the RTC engine exists',async()=>{
+    const {make,engine}=setup();const session=make();session.setOutputMuted(true);
+    await session.start('arrival');Socket.all[0].ready();await tick();await tick();
+    expect(engine.muteAllRemoteAudioPlaying).toHaveBeenLastCalledWith(true);
+  });
+
+  it("obtains microphone before paying and releases it on cancellation", async () => {
+    const { make } = setup();
+    const stop = vi.fn();
+    const track = {
+      enabled: true,
+      stop,
+      getSettings: () => ({ deviceId: "mic" }),
+    };
+    const gum = vi.fn(async () => ({
+      getTracks: () => [track],
+      getAudioTracks: () => [track],
+    }));
+    vi.stubGlobal("navigator", { mediaDevices: { getUserMedia: gum } });
+    const session = make();
+    await session.start("arrival", { microphone: true });
+    expect(gum).toHaveBeenCalledWith({
+      audio: { echoCancellation: true, noiseSuppression: true },
+      video: false,
+    });
+    expect(gum.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(fetch).mock.invocationCallOrder[0],
+    );
+    await session.stop();
+    expect(stop).toHaveBeenCalled();
+  });
+
   it("disables local audio and video publishing before joining RTC", async () => {
     const { make, engine } = setup();
     await make().start("arrival");

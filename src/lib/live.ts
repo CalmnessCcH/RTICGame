@@ -1,6 +1,15 @@
 export type LiveStatus =
   "idle" | "starting" | "warming" | "connecting" | "live" | "ended" | "error";
+export type LiveTranscript = {
+  id: string;
+  speaker: "user" | "character";
+  text: string;
+  final: boolean;
+};
 type Hooks = {
+  transcript?: (line: LiveTranscript) => void;
+  microphone?: (enabled: boolean) => void;
+  interaction?: (success: boolean, message: string) => void;
   status: (status: LiveStatus) => void;
   notice: (text: string) => void;
   started: (time: number, max: number) => void;
@@ -42,6 +51,9 @@ function loadSdk() {
   return sdkPromise;
 }
 export class LiveSession {
+  private outputMuted = false;
+  private microphone?: MediaStream;
+  private seen = new Set<string>();
   private data?: { id: string; ticket: string; rtc: any; maxSeconds: number };
   private socket?: WebSocket;
   private engine?: any;
@@ -63,7 +75,7 @@ export class LiveSession {
   private ensure() {
     if (this.stopped) throw new Error("会话已取消");
   }
-  async start(nodeId: string) {
+  async start(nodeId: string, options: { microphone?: boolean } = {}) {
     this.hooks.status("starting");
     this.pending = { action: "perform", nodeId };
     try {
@@ -78,6 +90,25 @@ export class LiveSession {
       this.ensure();
       if (!support.support)
         throw new Error("当前浏览器不支持实时视频，请尝试 Chrome 或 Edge。");
+      if (options.microphone) {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, noiseSuppression: true },
+            video: false,
+          });
+          if (this.stopped) {
+            stream.getTracks().forEach((t) => t.stop());
+            return;
+          }
+          this.microphone = stream;
+          this.hooks.microphone?.(true);
+        } catch {
+          this.ensure();
+          this.hooks.microphone?.(false);
+          this.hooks.notice("麦克风不可用，已切换为文字通话。");
+        }
+      }
+      this.ensure();
       const response = await fetch("/api/live", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -103,6 +134,15 @@ export class LiveSession {
         } catch {
           return;
         }
+        if (message.event === "transcript") {
+          const identity = `${message.speaker}:${message.id}:${message.text}`;
+          if (!message.final || !this.seen.has(identity)) {
+            if (message.final) this.seen.add(identity);
+            this.hooks.transcript?.(message);
+          }
+        }
+        if (message.event === "interaction")
+          this.hooks.interaction?.(message.success, message.message);
         if (message.event === "warming") this.hooks.status("warming");
         if (message.event === "ready" && !this.ready) {
           this.ready = true;
@@ -195,7 +235,12 @@ export class LiveSession {
     // publication flags are explicitly disabled before joining the channel.
     await engine.publishLocalVideoStream(false);
     this.ensure();
-    await engine.publishLocalAudioStream(false);
+    if (this.microphone) {
+      const track = this.microphone.getAudioTracks()[0];
+      await engine.switchMicrophone(track.getSettings().deviceId, track);
+      this.ensure();
+    }
+    await engine.publishLocalAudioStream(Boolean(this.microphone));
     this.ensure();
     await engine.setDefaultSubscribeAllRemoteAudioStreams(true);
     this.ensure();
@@ -204,6 +249,7 @@ export class LiveSession {
     await engine.joinChannel(this.data!.rtc.token, this.data!.rtc.user_id);
     this.ensure();
     this.joined = true;
+    engine.muteAllRemoteAudioPlaying?.(this.outputMuted);
     this.flushPerformance();
     this.frameTimer = setTimeout(() => {
       if (!this.stopped && this.video.readyState < 2) {
@@ -211,6 +257,39 @@ export class LiveSession {
         void this.stop("error");
       }
     }, 25000);
+  }
+  setMicrophone(enabled: boolean) {
+    if (!this.microphone) return false;
+    this.microphone.getAudioTracks().forEach((t) => {
+      t.enabled = enabled;
+    });
+    this.hooks.microphone?.(enabled);
+    return true;
+  }
+  setOutputMuted(muted: boolean) {
+    this.outputMuted = muted;
+    this.video.muted = muted;
+    this.engine?.muteAllRemoteAudioPlaying?.(muted);
+  }
+  updateScene(nodeId: string) {
+    if (this.socket?.readyState === WebSocket.OPEN)
+      this.socket.send(JSON.stringify({ action: "scene", nodeId }));
+  }
+  async interact(operation: Record<string, unknown>) {
+    if (!this.data || !this.joined || this.stopped)
+      throw new Error("请先连接实时通话。");
+    const res = await fetch("/api/live/interaction", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...operation,
+        id: this.data.id,
+        ticket: this.data.ticket,
+      }),
+      signal: AbortSignal.timeout(30000),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "互动请求失败");
   }
   private flushPerformance() {
     if (
@@ -250,6 +329,9 @@ export class LiveSession {
     this.stopped = true;
     this.ready = false;
     this.endRemote();
+    this.microphone?.getTracks().forEach((t) => t.stop());
+    this.microphone = undefined;
+    this.hooks.microphone?.(false);
     clearTimeout(this.frameTimer);
     if (this.socket?.readyState === WebSocket.OPEN) {
       this.socket.send(JSON.stringify({ action: "hangup" }));
@@ -264,7 +346,7 @@ export class LiveSession {
     // Serialize access to AliRTC's singleton: old cleanup must never destroy a replacement.
     this.stopTask = (async () => {
       await this.joinTask?.catch(() => {});
-      for (const method of ["leaveChannel", "destroy"]) {
+      for (const method of ["stopAudioCapture", "leaveChannel", "destroy"]) {
         try {
           await this.engine?.[method]?.();
         } catch {}

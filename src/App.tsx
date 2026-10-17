@@ -1,3 +1,4 @@
+import { stopWhenBackgrounded } from "./lib/visibility";
 import { useEffect, useRef, useState } from "react";
 import {
   ArrowRight,
@@ -40,10 +41,22 @@ import {
 import type { GameState, TurnResult } from "./game/types";
 import { loadGame, readGame, saveGame } from "./lib/storage";
 import { LiveSession, type LiveStatus } from "./lib/live";
+import { GameSettings } from "./components/GameSettings";
+import { Interactions } from "./components/Interactions";
+import { Memories } from "./components/Memories";
+import type { LiveTranscript } from "./lib/live";
 import { Modal } from "./components/Modal";
 
 type Panel =
-  "journal" | "people" | "history" | "settings" | "restart" | "about" | null;
+  | "memories"
+  | "interactions"
+  | "journal"
+  | "people"
+  | "history"
+  | "settings"
+  | "restart"
+  | "about"
+  | null;
 type Config = {
   viduConfigured: boolean;
   region: string;
@@ -76,6 +89,15 @@ export default function App() {
   const [playing, setPlaying] = useState(false);
   const [hasSave, setHasSave] = useState(() => Boolean(readGame()));
   const [panel, setPanel] = useState<Panel>(null);
+  const [micEnabled, setMicEnabled] = useState(false);
+  const [liveCaption, setLiveCaption] = useState("");
+  const [playerCaption, setPlayerCaption] = useState("");
+  const [interactionBusy, setInteractionBusy] = useState(false);
+  const [interactionMessage, setInteractionMessage] = useState("");
+  const transcriptHandler = useRef<(line: LiveTranscript) => void>(() => {});
+  transcriptHandler.current = receiveTranscript;
+  const voiceQueue = useRef<string[]>([]);
+  const voiceEpoch = useRef(0);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
@@ -148,10 +170,10 @@ export default function App() {
       void live.current?.stop("ended");
       recognition.current?.abort();
     };
-    document.addEventListener("visibilitychange", hidden);
+    const unbindVisibility = stopWhenBackgrounded(document, hidden);
     window.addEventListener("pagehide", leave);
     return () => {
-      document.removeEventListener("visibilitychange", hidden);
+      unbindVisibility();
       window.removeEventListener("pagehide", leave);
       leave();
     };
@@ -172,6 +194,10 @@ export default function App() {
     }
   }, [panel]);
   function stopLive() {
+    voiceQueue.current = [];
+    voiceEpoch.current++;
+    setMicEnabled(false);
+    setInteractionBusy(false);
     void live.current?.stop("ended");
     live.current = null;
     setLiveStarted(0);
@@ -185,6 +211,8 @@ export default function App() {
     setState(createGame());
     setPending(null);
     setReply("");
+    setLiveCaption("");
+    setPlayerCaption("");
     setInput("");
     setPlaying(true);
     setPanel(null);
@@ -200,41 +228,75 @@ export default function App() {
     setReply("");
     window.speechSynthesis?.cancel();
   }
-  function commit(result: TurnResult, previous: GameState) {
+  function commit(
+    result: TurnResult,
+    previous: GameState,
+    text = "",
+    fromVoice = false,
+  ) {
+    stateRef.current = result.state;
+    setPlayerCaption(text || previous.history.at(-1)?.text || "");
+    if (result.fallbackApplied) notify("她轻轻把话题带回眼前，故事继续。");
     setState(result.state);
     setInput("");
     if (result.advanced) {
       setReply(result.reply);
-      setPending({ nodeId: previous.nodeId, actionId: result.actionId! });
-      live.current?.performAction(previous.nodeId, result.actionId!);
+      if (fromVoice) {
+        setPending(null);
+        const next = story[result.state.nodeId];
+        if (
+          next.character !== story[previous.nodeId].character ||
+          next.ending
+        ) {
+          stopLive();
+          setLiveCaption("");
+        } else live.current?.updateScene(next.id);
+      } else {
+        setPending({ nodeId: previous.nodeId, actionId: result.actionId! });
+        live.current?.performAction(previous.nodeId, result.actionId!);
+      }
       const found = result.state.clues.find((c) => !previous.clues.includes(c));
       if (found) notify(`新线索已收录：${clues[found].title}`);
     } else {
       setReply(result.reply);
-      if (liveActive) live.current?.chat(previous.nodeId, input.trim());
+      if (liveActive && !fromVoice) live.current?.chat(previous.nodeId, text);
     }
   }
   function continueStory() {
     const next = story[state.nodeId];
     if (next.character !== node.character || next.ending) stopLive();
-    else live.current?.perform(next.id);
+    else {
+      live.current?.updateScene(next.id);
+      live.current?.perform(next.id);
+    }
     setPending(null);
     setReply("");
   }
   function choose(id: string) {
     if (turnLock.current || busy || pending) return;
     const before = stateRef.current;
-    commit(applyAction(before, id), before);
+    const action = availableActions(before).find((a) => a.id === id);
+    commit(applyAction(before, id), before, action?.label);
   }
-  async function submit() {
-    const text = input.trim();
-    if (!text || turnLock.current || node.ending || pending) return;
+  async function submit(value = input, fromVoice = false) {
+    const text = value.trim();
+    if (
+      !text ||
+      story[stateRef.current.nodeId].ending ||
+      (pending && !fromVoice)
+    )
+      return;
+    if (turnLock.current) {
+      if (fromVoice) voiceQueue.current.push(text);
+      return;
+    }
     turnLock.current = true;
     setBusy(true);
     recognition.current?.abort();
     const before = stateRef.current;
     const epoch = ++generation.current;
-    live.current?.interrupt();
+    if (!fromVoice) live.current?.interrupt();
+    setPlayerCaption(text);
     try {
       const response = await fetch("/api/turn", {
         method: "POST",
@@ -248,20 +310,46 @@ export default function App() {
       const valid = parseSave(JSON.stringify(result.state));
       if (!valid) throw new Error("响应格式无效");
       setMode(result.mode || "rules");
-      commit({ ...result, state: valid }, before);
-      if (!result.advanced && result.mode === "rules")
-        notify("规则试玩未匹配到明确选择；可以换个说法，或使用下方选项。");
+      commit({ ...result, state: valid }, before, text, fromVoice);
     } catch {
       if (epoch !== generation.current) return;
       setMode("rules");
-      commit(respondLocally(before, text), before);
+      commit(respondLocally(before, text), before, text, fromVoice);
       notify("已使用本地剧情规则回应。");
     } finally {
       if (epoch === generation.current) {
         turnLock.current = false;
         setBusy(false);
-        inputRef.current?.focus();
+        if (!fromVoice) inputRef.current?.focus();
+        const next = voiceQueue.current.shift();
+        const queuedVoiceEpoch = voiceEpoch.current;
+        if (next)
+          setTimeout(() => {
+            if (
+              epoch === generation.current &&
+              queuedVoiceEpoch === voiceEpoch.current
+            )
+              void submit(next, true);
+          }, 0);
       }
+    }
+  }
+  function receiveTranscript(line: LiveTranscript) {
+    if (line.speaker === "character") {
+      setLiveCaption(line.text);
+      return;
+    }
+    setPlayerCaption(line.text);
+    if (line.final) void submit(line.text, true);
+  }
+  async function applyInteraction(operation: Record<string, unknown>) {
+    setInteractionBusy(true);
+    setInteractionMessage("");
+    try {
+      await live.current?.interact(operation);
+    } catch (e) {
+      setInteractionBusy(false);
+      setInteractionMessage((e as Error).message);
     }
   }
   function startLive() {
@@ -275,8 +363,20 @@ export default function App() {
     }
     if (!video.current) return;
     window.speechSynthesis?.cancel();
+    setLiveCaption("");
+    setInteractionMessage("");
     live.current = new LiveSession(video.current, {
-      status: setLiveStatus,
+      status: (status) => {
+        setLiveStatus(status);
+        if (["ended", "idle", "error"].includes(status))
+          setInteractionBusy(false);
+      },
+      microphone: setMicEnabled,
+      transcript: (line) => transcriptHandler.current(line),
+      interaction: (_success, message) => {
+        setInteractionBusy(false);
+        setInteractionMessage(message);
+      },
       notice: notify,
       started: (at, max) => {
         setLiveStarted(at);
@@ -284,10 +384,16 @@ export default function App() {
       },
     });
     setPanel(null);
-    void live.current.start(node.id);
+    live.current.setOutputMuted(muted);
+    void live.current.start(node.id, { microphone: true });
     if (pending) live.current.performAction(pending.nodeId, pending.actionId);
   }
   function startVoice() {
+    if (liveActive) {
+      if (!live.current?.setMicrophone(!micEnabled))
+        notify("本次通话未取得麦克风权限，请结束后重新开启。");
+      return;
+    }
     if (listening) {
       recognition.current?.stop();
       return;
@@ -316,12 +422,12 @@ export default function App() {
       );
     };
     r.onresult = (e: any) => {
-      setInput(
-        Array.from(e.results as any[])
-          .map((x: any) => x[0].transcript)
-          .join("")
-          .slice(0, 1000),
-      );
+      const text = Array.from(e.results as any[])
+        .map((x: any) => x[0].transcript)
+        .join("")
+        .slice(0, 1000);
+      setInput(text);
+      if (e.results[e.results.length - 1].isFinal) void submit(text);
     };
     try {
       r.start();
@@ -400,12 +506,7 @@ export default function App() {
             故事
           </button>
           <button onClick={() => setPanel("people")}>人物</button>
-          <button onClick={() => setPanel("journal")}>
-            记忆
-            <span className="nav-count">
-              {state.clues.length.toString().padStart(2, "0")}
-            </span>
-          </button>
+          <button onClick={() => setPanel("memories")}>回忆</button>
         </nav>
         <div className="header-actions">
           {playing && !node.ending && (
@@ -557,11 +658,28 @@ export default function App() {
             >
               <Heart size={18} />
             </button>
+            <button
+              className="round-button"
+              onClick={() => setPanel("memories")}
+              aria-label="视频回忆"
+            >
+              <Film size={18} />
+            </button>
+            {liveActive && (
+              <button
+                className="round-button"
+                onClick={() => setPanel("interactions")}
+                aria-label="画面互动"
+              >
+                <Sparkles size={18} />
+              </button>
+            )}
             {liveActive && (
               <button
                 className="round-button"
                 onClick={() => {
                   setMuted(!muted);
+                  live.current?.setOutputMuted(!muted);
                   if (muted) void video.current?.play().catch(() => {});
                 }}
                 aria-label={muted ? "开启视频声音" : "关闭视频声音"}
@@ -618,6 +736,12 @@ export default function App() {
                       : "初次相识"}
                 </span>
               </div>
+              {playerCaption && (
+                <p className="player-subtitle">
+                  <span>你</span>
+                  {playerCaption}
+                </p>
+              )}
               <p className="dialogue" aria-live="polite">
                 {busy ? (
                   <>
@@ -629,7 +753,7 @@ export default function App() {
                     <span className="thinking-label">正在理解你的回应</span>
                   </>
                 ) : (
-                  reply || node.dialogue
+                  (liveActive && liveCaption) || reply || node.dialogue
                 )}
               </p>
               {pending ? (
@@ -681,7 +805,7 @@ export default function App() {
                     })}
                   </div>
                   <form
-                    className={`composer ${listening ? "listening" : ""}`}
+                    className={`composer ${liveActive ? "inline-composer" : ""} ${listening || micEnabled ? "listening" : ""}`}
                     onSubmit={(e) => {
                       e.preventDefault();
                       void submit();
@@ -692,9 +816,21 @@ export default function App() {
                       className="microphone"
                       onClick={startVoice}
                       disabled={busy}
-                      aria-label={listening ? "停止语音输入" : "语音输入"}
+                      aria-label={
+                        liveActive
+                          ? micEnabled
+                            ? "静音麦克风"
+                            : "开启麦克风"
+                          : listening
+                            ? "停止语音输入"
+                            : "语音输入"
+                      }
                     >
-                      {listening ? <AudioLines size={20} /> : <Mic size={19} />}
+                      {listening || micEnabled ? (
+                        <AudioLines size={20} />
+                      ) : (
+                        <Mic size={19} />
+                      )}
                     </button>
                     <span className="composer-divider" />
                     <textarea
@@ -705,8 +841,10 @@ export default function App() {
                       onChange={(e) => setInput(e.target.value)}
                       placeholder={
                         listening
-                          ? "正在听你说话，完成后请确认发送…"
-                          : `对${character.name}说些什么…`
+                          ? "正在听你说话，说完自动发送…"
+                          : liveActive && micEnabled
+                            ? "直接和她说话，或在这里输入…"
+                            : `对${character.name}说些什么…`
                       }
                       aria-label="你的回应"
                       disabled={busy}
@@ -737,6 +875,20 @@ export default function App() {
                   </form>
                 </>
               )}
+              {liveActive && (
+                <div className="live-tools">
+                  <button onClick={startVoice}>
+                    {micEnabled ? "● 麦克风开启 · 点击静音" : "○ 麦克风静音"}
+                  </button>
+                  <button onClick={() => live.current?.interrupt()}>
+                    打断
+                  </button>
+                  <button onClick={() => setPanel("interactions")}>
+                    道具 · 换装 · 背景
+                  </button>
+                  <span>本次通话会录入回忆</span>
+                </div>
+              )}
               <div className="play-footer">
                 <span>
                   <span className="status-dot" />
@@ -766,6 +918,8 @@ export default function App() {
         <Modal
           title={
             {
+              memories: "留在雨夜的回忆",
+              interactions: "让此刻有一点不同",
               journal: "留下的线索",
               people: "与你相遇的人",
               history: "那些说过的话",
@@ -776,6 +930,8 @@ export default function App() {
           }
           kicker={
             {
+              memories: "MOMENTS IN THE RAIN",
+              interactions: "A LITTLE CLOSER",
               journal: "THE THINGS WE KEEP",
               people: "PEOPLE IN THE RAIN",
               history: "CONVERSATION",
@@ -790,6 +946,15 @@ export default function App() {
             <div className="panel-notice" role="status">
               {notice}
             </div>
+          )}
+          {panel === "memories" && <Memories />}
+          {panel === "interactions" && (
+            <Interactions
+              active={liveStatus === "live"}
+              busy={interactionBusy}
+              message={interactionMessage}
+              onApply={(op) => void applyInteraction(op)}
+            />
           )}
           {panel === "journal" && (
             <>
@@ -885,6 +1050,11 @@ export default function App() {
           )}
           {panel === "settings" && (
             <div className="settings-list">
+              <GameSettings
+                config={config}
+                active={liveActive}
+                onSaved={setConfig}
+              />
               <section>
                 <span className="eyebrow">IMAGE & INTERACTION</span>
                 <h3>让她真正动起来</h3>
@@ -898,7 +1068,7 @@ export default function App() {
                   />
                   {config?.viduConfigured
                     ? `本地密钥已配置 · ${config.region === "api.vidu.com" ? "国际站" : "中国站"}`
-                    : "尚未配置密钥，请在本地 .env 中设置 VIDU_API_KEY"}
+                    : "尚未配置密钥，请在上方填写并保存"}
                 </div>
                 <button
                   className="outline-button"
@@ -982,10 +1152,11 @@ export default function App() {
                 <p>
                   {config?.llmConfigured
                     ? "已配置独立语言模型，输入将使用语义理解。"
-                    : "当前为规则剧情试玩：支持明确意图和推荐选项。开放式语义理解可在 .env 中接入语言模型。"}
+                    : "当前使用同义表达与模糊匹配；连续三轮未命中会自然进入默认剧情。可在上方配置语言模型增强理解。"}
                 </p>
                 <p className="fine-print">
-                  语音输入由浏览器识别服务处理，可能需要联网。角色均为原创成年虚构人物。
+                  通话时麦克风音频直接传给
+                  Vidu；摄像头保持关闭。静态模式说完自动发送。角色均为原创成年虚构人物。
                 </p>
               </section>
             </div>

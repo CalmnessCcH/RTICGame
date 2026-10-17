@@ -5,9 +5,20 @@ import { WebSocket, WebSocketServer } from "ws";
 import type { Server } from "node:http";
 import type { Express } from "express";
 import { avatarPayload, isLocalRequest, safeError } from "./safety";
+import { publicSettings, saveSettings } from "./settings";
+import {
+  interactionPayload,
+  parseTranscript,
+  OutboundEchoes,
+} from "./protocol";
+import { MemoryStore, keyTag } from "./memories";
 import { characters, story } from "../src/game/story";
 
 type Session = {
+  credentials: { key: string; host: string };
+  operation?: number;
+  transcriptSeen: Set<string>;
+  echoes: OutboundEchoes;
   id: string;
   ticket: string;
   character: string;
@@ -39,9 +50,12 @@ type Report = {
 };
 
 export function installLive(app: Express, server: Server) {
-  const key = (process.env.VIDU_API_KEY ?? "").replace(/^Token\s+/, "").trim();
-  const host =
-    process.env.VIDU_HOST === "api.vidu.com" ? "api.vidu.com" : "api.vidu.cn";
+  const credentials = () => ({
+    key: (process.env.VIDU_API_KEY ?? "").replace(/^Token\s+/, "").trim(),
+    host:
+      process.env.VIDU_HOST === "api.vidu.cn" ? "api.vidu.cn" : "api.vidu.com",
+  });
+  const memories = new MemoryStore();
   const maxSeconds = Math.max(
     15,
     Math.min(600, Number(process.env.LIVE_MAX_SECONDS) || 120),
@@ -66,7 +80,12 @@ export function installLive(app: Express, server: Server) {
         }),
       );
   }
-  async function api(path: string, options: RequestInit = {}) {
+  async function api(
+    path: string,
+    options: RequestInit = {},
+    auth = credentials(),
+  ) {
+    const { key, host } = auth;
     const response = await fetch(`https://${host}${path}`, {
       ...options,
       signal: AbortSignal.timeout(45000),
@@ -87,13 +106,26 @@ export function installLive(app: Express, server: Server) {
       );
     return data;
   }
-  async function queryReport(report: Report) {
+  async function queryReport(
+    report: Report,
+    auth: { key: string; host: string },
+  ) {
     try {
-      const data = await api(`/live/v1/lives/${encodeURIComponent(report.id)}`);
+      const data = await api(
+        `/live/v1/lives/${encodeURIComponent(report.id)}`,
+        {},
+        auth,
+      );
       const live = data.live ?? data;
       report.upstreamState = live.status;
       report.billedSeconds = Number(live.billed_seconds) || 0;
       report.creditsCost = Number(live.credits_cost) || 0;
+      void memories
+        .update(report.id, {
+          billedSeconds: report.billedSeconds,
+          creditsCost: report.creditsCost,
+        })
+        .catch(() => {});
     } catch (e) {
       report.queryError = safeError((e as Error).message);
     }
@@ -117,7 +149,20 @@ export function installLive(app: Express, server: Server) {
     s.report.endedAt = Date.now();
     s.report.reason = reason;
     sessions.delete(s.id);
-    const check = setTimeout(() => void queryReport(s.report), 1800);
+    void memories
+      .update(s.id, { status: "pending", endedAt: Date.now() })
+      .catch(() => {});
+    for (const delay of [15000, 45000, 90000, 150000, 240000]) {
+      const t = setTimeout(
+        () => void memories.refresh(s.id, s.credentials).catch(() => {}),
+        delay,
+      );
+      t.unref();
+    }
+    const check = setTimeout(
+      () => void queryReport(s.report, s.credentials),
+      1800,
+    );
     check.unref();
   }
   function attachUpstream(s: Session) {
@@ -134,6 +179,46 @@ export function installLive(app: Express, server: Server) {
         return;
       }
       s.report.messages++;
+      const transcript = parseTranscript(message);
+      if (transcript && !s.echoes.matches(transcript)) {
+        const identity = `${transcript.speaker}:${transcript.id}:${transcript.text}`;
+        if (!transcript.final || !s.transcriptSeen.has(identity)) {
+          send(s, { event: "transcript", ...transcript });
+          if (transcript.final) {
+            s.transcriptSeen.add(identity);
+            void memories
+              .append(
+                s.id,
+                transcript.speaker === "user"
+                  ? "你"
+                  : characters[s.character as "lin" | "shen"].name,
+                transcript.text,
+              )
+              .catch(() => {});
+          }
+        }
+      }
+      if (message.type === 12 && s.operation) {
+        const ack = message.payload?.prompt_operation_ack;
+        if (ack) {
+          send(s, {
+            event: "interaction",
+            success: ack.success === true,
+            message: ack.success
+              ? "参考图已接受，画面会在数秒内变化。"
+              : safeError(ack.error_msg || ack.error_code || "互动失败"),
+          });
+          s.operation = undefined;
+        }
+      }
+      if (
+        message.type === 98 &&
+        message.payload?.session_update_ack?.success === false
+      )
+        send(s, {
+          event: "error",
+          message: "当前场景人设更新失败，请结束后重新开启。",
+        });
       const ack = message.payload?.conn_init_ack;
       if (message.type === 2 && ack) {
         if (ack.success) {
@@ -192,15 +277,101 @@ export function installLive(app: Express, server: Server) {
   }
   app.get("/api/status", (_req, res) =>
     res.json({
-      viduConfigured: Boolean(key),
-      region: host,
+      ...publicSettings(),
       liveMaxSeconds: maxSeconds,
       activeLive: sessions.size,
-      llmConfigured: Boolean(process.env.LLM_API_KEY && process.env.LLM_MODEL),
     }),
   );
+  app.post("/api/settings", async (req, res) => {
+    if (creating || sessions.size) {
+      res.status(409).json({ error: "请先结束当前通话，再修改密钥。" });
+      return;
+    }
+    creating = true;
+    try {
+      await saveSettings(req.body);
+      res.json({
+        ...publicSettings(),
+        liveMaxSeconds: maxSeconds,
+        activeLive: 0,
+      });
+    } catch (e) {
+      res.status(400).json({ error: safeError((e as Error).message) });
+    } finally {
+      creating = false;
+    }
+  });
+  app.get("/api/memories", async (_req, res) => {
+    try {
+      res.json((await memories.list()).map(({ keyTag, ...m }) => m));
+    } catch {
+      res.status(500).json({ error: "回忆目录暂时不可用。" });
+    }
+  });
+  app.post("/api/memories/refresh", async (req, res) => {
+    const id = String(req.body?.id ?? "");
+    if (!(await memories.get(id))) {
+      res.status(404).json({ error: "回忆不存在。" });
+      return;
+    }
+    void memories.refresh(id, credentials()).catch(() => {});
+    res.json({ ok: true });
+  });
+  app.post("/api/memories/delete", async (req, res) => {
+    try {
+      await memories.remove(String(req.body?.id ?? ""));
+      res.json({ ok: true });
+    } catch (e) {
+      res.status(400).json({ error: safeError((e as Error).message) });
+    }
+  });
+  app.get("/api/memories/:id/video", async (req, res) => {
+    const m = await memories.get(String(req.params.id));
+    if (m?.status !== "ready") {
+      res.status(404).end();
+      return;
+    }
+    // The validated ID resolves inside our private .data directory.
+    res.sendFile(memories.file(m.id), { dotfiles: "allow" });
+  });
   app.get("/api/live/reports", (_req, res) => res.json(reports));
+  app.post("/api/live/interaction", async (req, res) => {
+    const s = sessions.get(req.body?.id);
+    if (!s || s.ticket !== req.body?.ticket || !s.ready || s.ended) {
+      res.status(409).json({ error: "请先连接实时通话。" });
+      return;
+    }
+    if (s.operation) {
+      res.status(409).json({ error: "上一项画面互动仍在处理。" });
+      return;
+    }
+    s.operation = Date.now();
+    try {
+      const payload = await interactionPayload(req.body);
+      if (s.ended) throw new Error("通话已结束。");
+      signal(s, 11, payload);
+      const marker = s.operation;
+      s.timers.push(
+        setTimeout(() => {
+          if (s.operation === marker) {
+            s.operation = undefined;
+            send(s, {
+              event: "interaction",
+              success: false,
+              message: "未收到参考图确认，请观察画面后再试。",
+            });
+          }
+        }, 20000),
+      );
+      res.json({ ok: true });
+    } catch (e) {
+      s.operation = undefined;
+      res.status(400).json({ error: safeError((e as Error).message) });
+    }
+  });
   app.post("/api/live", async (req, res) => {
+    const auth = credentials();
+    const { key, host } = auth;
     if (!key) {
       res.status(503).json({ error: "尚未配置 Vidu API 密钥。" });
       return;
@@ -250,6 +421,9 @@ export function installLive(app: Express, server: Server) {
       reports.push(report);
       if (reports.length > 20) reports.shift();
       const s: Session = {
+        credentials: auth,
+        transcriptSeen: new Set(),
+        echoes: new OutboundEchoes(),
         id,
         conn,
         remote,
@@ -263,6 +437,16 @@ export function installLive(app: Express, server: Server) {
         report,
       };
       sessions.set(id, s);
+      void memories
+        .create({
+          id,
+          nodeId: node.id,
+          character: node.character,
+          createdAt: Date.now(),
+          region: host,
+          keyTag: keyTag(key),
+        })
+        .catch(() => {});
       attachUpstream(s);
       if (!data.rtc?.token) {
         end(s, "缺少 RTC 凭据");
@@ -328,6 +512,19 @@ export function installLive(app: Express, server: Server) {
             return;
           }
           if (!s.ready || s.ended) return;
+          if (msg.action === "scene") {
+            const current = story[msg.nodeId];
+            if (!current || current.character !== s.character || current.ending)
+              return;
+            signal(s, 97, {
+              session_update: {
+                avatar: {
+                  persona: avatarPayload(current.id, "").avatar.persona,
+                },
+              },
+            });
+            return;
+          }
           if (msg.action === "interrupt") {
             signal(s, 7, {});
             return;
@@ -352,8 +549,13 @@ export function installLive(app: Express, server: Server) {
           else return;
           s.lastText = Date.now();
           s.report.textSent++;
+          void memories
+            .append(s.id, msg.action === "chat" ? "你" : "剧情指令", content)
+            .catch(() => {});
+          const msgId = randomUUID();
+          s.echoes.add(content, msgId);
           signal(s, 99, {
-            text_msg: { msg_id: randomUUID(), content, timestamp: Date.now() },
+            text_msg: { msg_id: msgId, content, timestamp: Date.now() },
           });
           send(s, { event: "text_sent" });
         } catch {

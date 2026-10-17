@@ -1,0 +1,21 @@
+import { expect, it, vi } from "vitest";
+import { stopWhenBackgrounded } from "../src/lib/visibility";
+it("ignores a transient visibility flip but ends a background call", () => {
+  vi.useFakeTimers();
+  const target = Object.assign(new EventTarget(), { hidden: false });
+  const stop = vi.fn();
+  const off = stopWhenBackgrounded(target as Document, stop);
+  target.hidden = true;
+  target.dispatchEvent(new Event("visibilitychange"));
+  vi.advanceTimersByTime(20);
+  target.hidden = false;
+  target.dispatchEvent(new Event("visibilitychange"));
+  vi.advanceTimersByTime(1000);
+  expect(stop).not.toHaveBeenCalled();
+  target.hidden = true;
+  target.dispatchEvent(new Event("visibilitychange"));
+  vi.advanceTimersByTime(1000);
+  expect(stop).toHaveBeenCalledTimes(1);
+  off();
+  vi.useRealTimers();
+});

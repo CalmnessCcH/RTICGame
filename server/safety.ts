@@ -28,6 +28,11 @@ export function avatarPayload(nodeId: string, image: string) {
   const c = characters[node.character];
   return {
     model: "vidu-s2",
+    enable_recording: true,
+    audio: { enable_transcription: true },
+    vad: { type: "server", threshold: 0.5, silence_duration_ms: 700 },
+    idle_motion: { enabled: true, source: "default", recommend: "intelligent" },
+    action: { enabled: true },
     call_mode: "video",
     character_id: "1",
     avatar: {

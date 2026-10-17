@@ -2105,3 +2105,258 @@ h3 {
   line-height: 1.8;
   color: #e1dec8;
 }
+/* Live conversation stays on the cinematic stage. */
+.player-subtitle {
+  font-size: 13px;
+  line-height: 1.6;
+  color: #c9cbbf;
+  margin: 0 0 12px;
+  max-width: 800px;
+  text-shadow: 0 1px 8px #000;
+}
+.player-subtitle span {
+  font-size: 10px;
+  color: #c6ae7a;
+  margin-right: 14px;
+  letter-spacing: 2px;
+}
+.composer.inline-composer {
+  border: 0;
+  border-bottom: 1px solid #ffffff32;
+  background: transparent;
+  box-shadow: none;
+  padding-left: 0;
+  padding-right: 0;
+  margin-top: 14px;
+}
+.composer.inline-composer:focus-within {
+  border-color: #c6ae7a;
+  background: transparent;
+}
+.inline-composer textarea {
+  background: transparent;
+}
+.live-tools {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+  margin-top: 13px;
+  font-size: 11px;
+  color: #b5bfae;
+}
+.live-tools button {
+  padding: 6px 0;
+  background: none;
+  border: 0;
+  color: #d7c89e;
+  cursor: pointer;
+}
+.live-tools span {
+  margin-left: auto;
+  font-size: 10px;
+}
+.connection-settings form,
+.interactions details {
+  display: grid;
+  gap: 16px;
+}
+.connection-settings label,
+.interactions label {
+  display: grid;
+  gap: 8px;
+  font-size: 12px;
+  color: #c6cbbb;
+}
+.connection-settings input,
+.connection-settings select,
+.interactions input,
+.interactions select {
+  width: 100%;
+  background: #0e1a13;
+  border: 1px solid #65735a70;
+  border-radius: 3px;
+  padding: 12px;
+  color: #f0eedd;
+  font: inherit;
+}
+.connection-settings details,
+.interactions details,
+.memory-card details {
+  border-top: 1px solid #ffffff20;
+  padding-top: 16px;
+}
+.connection-settings details label {
+  margin: 12px 0;
+}
+.connection-settings summary,
+.interactions summary,
+.memory-card summary {
+  font-size: 12px;
+  color: #d8c798;
+  cursor: pointer;
+  padding: 6px 0;
+}
+.connection-settings button {
+  justify-self: start;
+}
+.connection-settings p[role="status"] {
+  color: #d6c69d;
+}
+.interaction-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+  margin: 20px 0;
+}
+.interaction-grid button {
+  position: relative;
+  text-align: left;
+  background: #1e2b20;
+  border: 1px solid #63705b66;
+  color: #e8e8d9;
+  padding: 0 0 14px;
+  cursor: pointer;
+  border-radius: 4px;
+  overflow: hidden;
+}
+.interaction-grid button:hover:not(:disabled) {
+  border-color: #c5ae76;
+}
+.interaction-grid button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.interaction-grid img {
+  width: 100%;
+  height: 120px;
+  object-fit: cover;
+  object-position: center 20%;
+  display: block;
+  margin-bottom: 12px;
+}
+.interaction-grid small,
+.interaction-grid span {
+  display: block;
+  margin: 0 12px;
+}
+.interaction-grid small {
+  font-size: 10px;
+  color: #c5ae76;
+  margin-bottom: 5px;
+}
+.interaction-grid span {
+  font-family: var(--serif);
+  font-size: 16px;
+}
+.reference-preview {
+  max-height: 180px;
+  max-width: 100%;
+  object-fit: contain;
+}
+.interactions > p[role="status"] {
+  color: #d6c69d;
+  font-size: 12px;
+  min-height: 30px;
+}
+.memory-card {
+  border: 1px solid #63705b66;
+  background: #19261c;
+  padding: 20px;
+  margin: 20px 0;
+  border-radius: 4px;
+}
+.memory-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 15px;
+}
+.memory-heading small {
+  font-size: 10px;
+  color: #a9b19f;
+}
+.memory-heading h3 {
+  font-family: var(--serif);
+  font-size: 19px;
+  margin: 8px 0;
+}
+.memory-heading > span {
+  font-size: 11px;
+  color: #c5ae76;
+}
+.memory-cover {
+  width: 100%;
+  aspect-ratio: 16/9;
+  background-position: center;
+  background-size: cover;
+  border: 0;
+  color: white;
+  cursor: pointer;
+  font: 16px var(--serif);
+  text-shadow: 0 1px 8px #000;
+}
+.memory-cover:disabled {
+  filter: brightness(0.6);
+  cursor: default;
+}
+.memory-card video {
+  width: 100%;
+  max-height: 440px;
+  background: #000;
+}
+.memory-actions {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  flex-wrap: wrap;
+  margin: 15px 0;
+}
+.memory-actions small {
+  margin-left: auto;
+  color: #a9b19f;
+}
+.memory-actions a {
+  text-decoration: none;
+}
+.memory-card details p {
+  font-size: 12px;
+  line-height: 1.8;
+}
+.memory-card details strong {
+  color: #c5ae76;
+  font-weight: 400;
+}
+@media (max-width: 600px) {
+  .interaction-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .interaction-grid img {
+    height: 100px;
+  }
+  .live-tools {
+    gap: 12px;
+    font-size: 10px;
+  }
+  .live-tools span {
+    display: none;
+  }
+  .memory-card {
+    padding: 12px;
+  }
+  .memory-heading {
+    align-items: flex-start;
+  }
+  .memory-heading h3 {
+    font-size: 16px;
+  }
+  .player-subtitle {
+    font-size: 11px;
+    max-height: 42px;
+    overflow: auto;
+  }
+  .inline-composer {
+    margin-top: 8px !important;
+  }
+}

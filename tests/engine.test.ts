@@ -5,6 +5,7 @@ import {
   applyAction,
   interpretInput,
   parseSave,
+  respondLocally,
 } from "../src/game/engine";
 import { story } from "../src/game/story";
 import type { GameState } from "../src/game/types";
@@ -115,5 +116,38 @@ describe("save integrity", () => {
       parseSave(JSON.stringify({ ...saved, clues: ["hacked"] })),
     ).toBeNull();
     expect(parseSave(JSON.stringify({ ...saved, version: 2 }))).toBeNull();
+  });
+});
+
+describe("conversational routing", () => {
+  it("understands paraphrased apology without requiring exact wording", () => {
+    expect(
+      respondLocally(createGame(), "不好意思啊，路上堵车让你等那么久").actionId,
+    ).toBe("apologize");
+  });
+  it("does not confuse a negated paraphrase with an apology", () => {
+    expect(respondLocally(createGame(), "我不打算道歉").advanced).toBe(false);
+  });
+  it("routes three unmatched turns to a safe branch and resets the counter", () => {
+    let state = createGame();
+    for (let i = 0; i < 2; i++) {
+      const r = respondLocally(state, "今天月亮真好看");
+      expect(r.advanced).toBe(false);
+      state = r.state;
+    }
+    const result = respondLocally(state, "我还想随便聊聊");
+    expect(result.advanced).toBe(true);
+    expect(result.actionId).toBe("ask-reason");
+    expect(result.state.unmatchedTurns).toBe(0);
+    expect(result.fallbackApplied).toBe(true);
+  });
+  it("migrates old saves and never takes a locked default branch", () => {
+    const legacy: any = createGame();
+    delete legacy.unmatchedTurns;
+    expect(parseSave(JSON.stringify(legacy))?.unmatchedTurns).toBe(0);
+    const s = { ...createGame(), nodeId: "evidence", unmatchedTurns: 2 };
+    const r = respondLocally(s, "嗯嗯");
+    expect(r.actionId).not.toBe("compare-clues");
+    expect(r.state.clues).not.toContain("splice");
   });
 });
